@@ -110,6 +110,86 @@ func TestAccAWSSSMPatchBaselineWithOperatingSystem(t *testing.T) {
 	})
 }
 
+func TestAccAWSSSMPatchBaselineMissingPatch(t *testing.T) {
+	var before ssm.PatchBaselineIdentity
+	name := acctest.RandString(10)
+	closure := deleteSsmOutsideOfTerraform("foo", name)
+	resource.Test(t, resource.TestCase{
+		Providers: testAccProviders,
+		Steps: []resource.TestStep{
+			{
+				Config: myTestConfig("foo", name),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckAWSSSMPatchBaselineExists("aws_ssm_patch_baseline.foo", &before),
+				),
+			},
+			{
+				PreConfig: closure,
+				Config:    myTestConfig("foo", name),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckAWSSSMPatchBaselineExists("aws_ssm_patch_baseline.foo", &before),
+				),
+			},
+		},
+	})
+}
+
+func deleteSsmOutsideOfTerraform(rsName string, rName string) func() {
+	return func() {
+		println(fmt.Sprintf("*** Here, somehow delete %s %s ***", rsName, rName))
+		sess := session.Must(session.NewSession())
+		svc := ssm.New(
+			sess,
+			aws.NewConfig().WithRegion("ap-northeast-1"),
+		)
+		// patch baseline name will be created
+		var rNameOfBaseline = fmt.Sprintf("patch-baseline-%s", rName)
+
+		pbi, _ := svc.DescribePatchBaselines(
+			&ssm.DescribePatchBaselinesInput{
+				Filters: []*ssm.PatchOrchestratorFilter{
+					{
+						Key:    aws.String("NAME_PREFIX"),
+						Values: []*string{aws.String(rNameOfBaseline)},
+					},
+				},
+			},
+		)
+		var baselineIDBefore = pbi.BaselineIdentities[0].BaselineId
+		res, _ := svc.DeletePatchBaseline(
+			&ssm.DeletePatchBaselineInput{
+				BaselineId: baselineIDBefore,
+			},
+		)
+		pp.Println(res)
+		pbiAfter, _ := svc.DescribePatchBaselines(
+			&ssm.DescribePatchBaselinesInput{
+				Filters: []*ssm.PatchOrchestratorFilter{
+					{
+						Key:    aws.String("NAME_PREFIX"),
+						Values: []*string{aws.String(rNameOfBaseline)},
+					},
+				},
+			},
+		)
+		pp.Println(pbiAfter)
+	}
+}
+
+func myTestConfig(rsName string, rName string) string {
+
+	return fmt.Sprintf(`
+
+resource "aws_ssm_patch_baseline" "%s" {
+  name  = "patch-baseline-%s"
+  description = "Created by Hiroyuki Nagata"
+  approved_patches = ["KB123456"]
+  approved_patches_compliance_level = "CRITICAL"
+}
+
+`, rsName, rName)
+}
+
 func testAccCheckAwsSsmPatchBaselineRecreated(t *testing.T,
 	before, after *ssm.PatchBaselineIdentity) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
@@ -154,6 +234,116 @@ func testAccCheckAWSSSMPatchBaselineExists(n string, patch *ssm.PatchBaselineIde
 
 		return fmt.Errorf("No AWS SSM Patch Baseline found")
 	}
+}
+
+func testAccCheckAWSSSMPatchBaselineDestroy(s *terraform.State) error {
+	conn := testAccProvider.Meta().(*AWSClient).ssmconn
+
+	for _, rs := range s.RootModule().Resources {
+		if rs.Type != "aws_ssm_patch_baseline" {
+			continue
+		}
+
+		out, err := conn.DescribePatchBaselines(&ssm.DescribePatchBaselinesInput{
+			Filters: []*ssm.PatchOrchestratorFilter{
+				{
+					Key:    aws.String("NAME_PREFIX"),
+					Values: []*string{aws.String(rs.Primary.Attributes["name"])},
+				},
+			},
+		})
+
+		if err != nil {
+			return err
+		}
+
+		if len(out.BaselineIdentities) > 0 {
+			return fmt.Errorf("Expected AWS SSM Patch Baseline to be gone, but was still found")
+		}
+
+		return nil
+	}
+
+	return nil
+}
+
+func testAccAWSSSMPatchBaselineBasicConfig(rName string) string {
+	return fmt.Sprintf(`
+
+resource "aws_ssm_patch_baseline" "foo" {
+  name  = "patch-baseline-%s"
+  description = "Baseline containing all updates approved for production systems"
+  approved_patches = ["KB123456"]
+  approved_patches_compliance_level = "CRITICAL"
+}
+
+`, rName)
+}
+
+func testAccAWSSSMPatchBaselineBasicConfigUpdated(rName string) string {
+	return fmt.Sprintf(`
+
+resource "aws_ssm_patch_baseline" "foo" {
+  name  = "updated-patch-baseline-%s"
+  description = "Baseline containing all updates approved for production systems - August 2017"
+  approved_patches = ["KB123456","KB456789"]
+  approved_patches_compliance_level = "HIGH"
+}
+
+`, rName)
+}
+
+func testAccAWSSSMPatchBaselineConfigWithOperatingSystem(rName string) string {
+	return fmt.Sprintf(`
+
+resource "aws_ssm_patch_baseline" "foo" {
+  name  = "patch-baseline-%s"
+  operating_system = "AMAZON_LINUX"
+  description = "Baseline containing all updates approved for production systems"
+  approval_rule {
+  	approve_after_days = 7
+	enable_non_security = true
+  	compliance_level = "CRITICAL"
+
+  	patch_filter {
+		key = "PRODUCT"
+		values = ["AmazonLinux2016.03","AmazonLinux2016.09","AmazonLinux2017.03","AmazonLinux2017.09"]
+  	}
+
+  	patch_filter {
+		key = "SEVERITY"
+		values = ["Critical","Important"]
+  	}
+  }
+}
+
+`, rName)
+}
+
+func testAccAWSSSMPatchBaselineConfigWithOperatingSystemUpdated(rName string) string {
+	return fmt.Sprintf(`
+
+resource "aws_ssm_patch_baseline" "foo" {
+  name  = "patch-baseline-%s"
+  operating_system = "WINDOWS"
+  description = "Baseline containing all updates approved for production systems"
+  approval_rule {
+  	approve_after_days = 7
+  	compliance_level = "INFORMATIONAL"
+
+  	patch_filter {
+		key = "PRODUCT"
+		values = ["WindowsServer2012R2"]
+  	}
+
+  	patch_filter {
+		key = "MSRC_SEVERITY"
+		values = ["Critical","Important"]
+  	}
+  }
+}
+
+`, rName)
 }
 
 func testAccCheckAWSSSMPatchBaselineDestroy(s *terraform.State) error {
